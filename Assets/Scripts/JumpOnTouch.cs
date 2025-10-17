@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.Interaction.Toolkit;
+using UnityEngine.InputSystem;
 
 public class JumpOnTouch : MonoBehaviour
 {
@@ -11,13 +12,31 @@ public class JumpOnTouch : MonoBehaviour
 	[Header("XR Settings")]
 	[SerializeField] private bool useXRInteraction = false;
 	
+	[Header("Debug")]
+	[SerializeField] private bool enableDebugLogs = true;
+	
 	private Vector3 originalPosition;
 	private bool isJumping = false;
 	private float jumpTimer = 0f;
+	private Camera arCamera;
 	
 	private void Start()
 	{
 		originalPosition = transform.position;
+
+		// Find the AR camera
+		arCamera = Camera.main;
+		if (arCamera == null)
+		{
+			// Try to find AR Camera if Camera.main is not set
+			arCamera = FindFirstObjectByType<Camera>();
+		}
+		
+		// Check for required components
+		if (GetComponent<Collider>() == null)
+		{
+			Debug.LogError($"JumpOnTouch: {gameObject.name} needs a Collider component to detect clicks!");
+		}
 		
 		// Add XR Interaction components if needed
 		if (useXRInteraction && GetComponent<UnityEngine.XR.Interaction.Toolkit.Interactables.XRSimpleInteractable>() == null)
@@ -29,42 +48,46 @@ public class JumpOnTouch : MonoBehaviour
 	
 	private void Update()
 	{
-		// Handle mobile AR touch input
-		if (!useXRInteraction && Input.touchCount > 0)
+		// Handle touch/click input using the new Input System
+		if (!useXRInteraction)
 		{
-			Touch touch = Input.GetTouch(0);
+			bool inputDetected = false;
+			Vector2 inputPosition = Vector2.zero;
 			
-			if (touch.phase == TouchPhase.Began)
+			// Touch input (mobile)
+			if (Touchscreen.current != null && Touchscreen.current.primaryTouch.press.wasPressedThisFrame)
 			{
-				Ray ray = Camera.main.ScreenPointToRay(touch.position);
+				inputDetected = true;
+				inputPosition = Touchscreen.current.primaryTouch.position.ReadValue();
+			}
+			// Mouse input (Editor/Standalone)
+			else if (Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame)
+			{
+				inputDetected = true;
+				inputPosition = Mouse.current.position.ReadValue();
+			}
+			
+			if (inputDetected)
+			{
+				if (arCamera == null)
+				{
+					Debug.LogError("JumpOnTouch: No camera found!");
+					return;
+				}
+				
+				Ray ray = arCamera.ScreenPointToRay(inputPosition);
 				RaycastHit hit;
 				
-				if (Physics.Raycast(ray, out hit))
+
+				if (Physics.Raycast(ray, out hit, Mathf.Infinity))
 				{
-					if (hit.collider.gameObject == gameObject)
+					if (hit.collider.gameObject == gameObject || hit.collider.transform.IsChildOf(gameObject.transform))
 					{
 						Jump();
 					}
 				}
 			}
 		}
-		
-		// Handle mouse click for testing in editor
-		#if UNITY_EDITOR
-		if (Input.GetMouseButtonDown(0))
-		{
-			Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-			RaycastHit hit;
-			
-			if (Physics.Raycast(ray, out hit))
-			{
-				if (hit.collider.gameObject == gameObject)
-				{
-					Jump();
-				}
-			}
-		}
-		#endif
 		
 		// Handle jump animation
 		if (isJumping)
@@ -92,7 +115,7 @@ public class JumpOnTouch : MonoBehaviour
 		Jump();
 	}
 	
-	private void Jump()
+	public void Jump()
 	{
 		if (!isJumping)
 		{

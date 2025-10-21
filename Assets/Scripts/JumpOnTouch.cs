@@ -12,9 +12,6 @@ public class JumpOnTouch : MonoBehaviour
 	[Header("XR Settings")]
 	[SerializeField] private bool useXRInteraction = false;
 	
-	[Header("Debug")]
-	[SerializeField] private bool enableDebugLogs = true;
-	
 	private Vector3 originalPosition;
 	private bool isJumping = false;
 	private float jumpTimer = 0f;

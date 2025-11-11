@@ -1,18 +1,16 @@
 using UnityEngine;
 using System.Collections.Generic;
-using UnityEngine.XR.ARFoundation;
-using UnityEngine.XR.Interaction.Toolkit;
-using UnityEngine.XR.Interaction.Toolkit.Interactables;
+using Vuforia;
 using UnityEngine.InputSystem;
 
 public enum PieceType { Peao, Torre, Cavalo, Bispo, Rainha, Rei }
 public enum PieceColor { Branco, Preto }
-public enum PlayMode { StandaloneMobile, AR_ImageTracking, VR_Headset }
+public enum PlayMode { StandaloneMobile, AR_ImageTracking }
 
 public class BoardManager : MonoBehaviour
 {
 	[Header("Play Mode")]
-	[Tooltip("Modo de jogo: Mobile standalone (tilt), AR com QR/marcador, ou VR com headset")]
+	[Tooltip("Modo de jogo: Mobile standalone (tilt) ou AR com Image Tracking do Vuforia")]
 	[SerializeField] private PlayMode playMode = PlayMode.StandaloneMobile;
 
 	[Header("Game State")]
@@ -23,40 +21,28 @@ public class BoardManager : MonoBehaviour
 	public System.Action<PieceColor> OnTurnChanged;
 
 	[Header("Prefabs")]
-	[SerializeField] private GameObject queenPrefab;
-	[SerializeField] private GameObject kingPrefab;
-	[SerializeField] private GameObject bishopRightPrefab;
-	[SerializeField] private GameObject bishopLeftPrefab;
-	[SerializeField] private GameObject knightRightPrefab;
-	[SerializeField] private GameObject knightLeftPrefab;
-	[SerializeField] private GameObject hookLeftPrefab;
-	[SerializeField] private GameObject hookRightPrefab;
-	[SerializeField] private GameObject[] pawnPrefabs;
-	// Preparando o material para as peças brancas e pretas
-	[SerializeField] private Texture2D whitePiecesMaterial;
-	[SerializeField] private Texture2D blackPiecesMaterial;
+	[Tooltip("Instancia pai das peças brancas")]
+	[SerializeField] private GameObject whitePiecesParent;
+	[Tooltip("Instancia pai das peças pretas")]
+	[SerializeField] private GameObject blackPiecesParent;
+	[Tooltip("Instancia pai do tabuleiro")]
+	[SerializeField] private GameObject boardParent;
 
 	[SerializeField] private GameObject highlightPrefab; // Prefab para indicar casas válidas
-	[SerializeField] private GameObject whiteTilePrefab;
-	[SerializeField] private GameObject blackTilePrefab;
 
 	[Header("Configurações do Tabuleiro")]
 	[Tooltip("Tamanho de cada casa do tabuleiro.")]
 	[SerializeField] private float tileSize = 1.0f; // Tamanho de cada casa do tabuleiro
+	[Tooltip("Offset local (X,Z) do canto inferior esquerdo (0,0) do tabuleiro em relação ao pivot do GameObject do Board.")]
+	[SerializeField] private Vector2 boardOriginOffsetLocal = Vector2.zero;
 	[SerializeField] private bool enableDebugLogs = false;
 	[SerializeField] private Camera arCamera; // Permite atribuir manualmente no Inspector
 
 	[Header("AR Image Tracking")]
-	[Tooltip("Nome da imagem de referência (QR/marcador) na Reference Image Library")]
+	[Tooltip("Nome do Image Target configurado no Vuforia")]
 	[SerializeField] private string targetImageName = "ChessMarker";
-	[SerializeField] private ARTrackedImageManager trackedImageManager;
-	private ARTrackedImage trackedBoardAnchor;
+	[SerializeField] private ObserverBehaviour imageTargetBehaviour;
 	private bool boardPlacedInAR = false;
-
-	[Header("VR Interaction")]
-	[Tooltip("Permite pegar e girar o tabuleiro no VR")]
-	[SerializeField] private bool enableVRGrab = true;
-	private XRGrabInteractable grabInteractable;
 
 	[Header("Device Rotation (Tilt) - Apenas Standalone Mobile")]
 	[SerializeField] private bool enableDeviceRotation = true; // gira o tabuleiro pelo tilt do celular
@@ -78,9 +64,6 @@ public class BoardManager : MonoBehaviour
 			case PlayMode.AR_ImageTracking:
 				SetupARImageTracking();
 				break;
-			case PlayMode.VR_Headset:
-				SetupVRHeadset();
-				break;
 		}
 
 		CreateBoard();
@@ -94,6 +77,9 @@ public class BoardManager : MonoBehaviour
 		// Guardar rotação inicial do tabuleiro
 		initialBoardRotation = transform.rotation;
 		
+		// Como o tabuleiro e as peças já estão posicionados na cena (AR/ImageTarget),
+		// sincronizamos o estado interno do jogo a partir dos objetos existentes.
+		SyncBoardFromScene();
 	}
 
 	private void SetupStandaloneMobile()
@@ -103,99 +89,88 @@ public class BoardManager : MonoBehaviour
 
 	private void SetupARImageTracking()
 	{
-		if (trackedImageManager == null)
+		// Procurar pelo ImageTarget na cena se não foi atribuído
+		if (imageTargetBehaviour == null)
 		{
-			trackedImageManager = FindFirstObjectByType<ARTrackedImageManager>();
+			// Procurar por ImageTargetBehaviour na cena
+			var imageTargets = FindObjectsByType<ImageTargetBehaviour>(FindObjectsSortMode.None);
+			foreach (var target in imageTargets)
+			{
+				if (target.TargetName == targetImageName)
+				{
+					imageTargetBehaviour = target;
+					break;
+				}
+			}
 		}
 
-		if (trackedImageManager != null)
+		if (imageTargetBehaviour != null)
 		{
-			// AR Foundation 6.0: usar trackablesChanged ao invés de trackedImagesChanged
-			trackedImageManager.trackablesChanged.AddListener(OnTrackedImagesChanged);
-			if (enableDebugLogs) Debug.Log("BoardManager: AR Image Tracking mode - waiting for marker detection");
+			// Registrar diretamente nos eventos do Vuforia
+			var observerBehaviour = imageTargetBehaviour.GetComponent<ObserverBehaviour>();
+			if (observerBehaviour != null)
+			{
+				observerBehaviour.OnTargetStatusChanged += OnVuforiaTargetStatusChanged;
+			}
+			
+			if (enableDebugLogs) Debug.Log("BoardManager: AR Image Tracking mode - waiting for Vuforia marker detection");
 		}
 		else
 		{
-			Debug.LogError("BoardManager: AR mode requires ARTrackedImageManager in scene!");
+			Debug.LogError("BoardManager: AR mode requires ImageTargetBehaviour in scene with target name: " + targetImageName);
 		}
 
 		// Desabilitar tilt em AR
 		enableDeviceRotation = false;
 	}
 
-	private void SetupVRHeadset()
+	private void OnVuforiaTargetStatusChanged(ObserverBehaviour behaviour, TargetStatus targetStatus)
 	{
-		// Adicionar XRGrabInteractable para permitir pegar e girar o tabuleiro
-		if (enableVRGrab)
+		// Status.Status indica o estado de tracking
+		if (targetStatus.Status == Status.TRACKED || 
+			targetStatus.Status == Status.EXTENDED_TRACKED)
 		{
-			grabInteractable = gameObject.GetComponent<XRGrabInteractable>();
-			if (grabInteractable == null)
-			{
-				grabInteractable = gameObject.AddComponent<XRGrabInteractable>();
-			}
-
-			// Configurar para permitir rotação suave
-			grabInteractable.movementType = XRBaseInteractable.MovementType.Instantaneous;
-			grabInteractable.trackRotation = true;
-			grabInteractable.throwOnDetach = false;
-
-			if (enableDebugLogs) Debug.Log("BoardManager: VR mode - grab interaction enabled");
+			// Marcador detectado e sendo rastreado
+			OnVuforiaTargetFound();
 		}
-
-		// Desabilitar tilt em VR
-		enableDeviceRotation = false;
-	}
-
-	// AR Foundation 6.0: usar ARTrackablesChangedEventArgs<ARTrackedImage>
-	private void OnTrackedImagesChanged(ARTrackablesChangedEventArgs<ARTrackedImage> args)
-	{
-		// Quando uma imagem é detectada
-		foreach (var trackedImage in args.added)
+		else if (targetStatus.Status == Status.NO_POSE)
 		{
-			if (trackedImage.referenceImage.name == targetImageName)
-			{
-				PlaceBoardOnARMarker(trackedImage);
-			}
-		}
-
-		// Atualizar posição quando a imagem se move
-		foreach (var trackedImage in args.updated)
-		{
-			if (trackedImage.referenceImage.name == targetImageName && trackedImage.trackingState == UnityEngine.XR.ARSubsystems.TrackingState.Tracking)
-			{
-				UpdateBoardPositionAR(trackedImage);
-			}
+			// Marcador perdido
+			OnVuforiaTargetLost();
 		}
 	}
 
-	private void PlaceBoardOnARMarker(ARTrackedImage trackedImage)
+	// Callbacks do Vuforia
+	private void OnVuforiaTargetFound()
 	{
-		trackedBoardAnchor = trackedImage;
-		boardPlacedInAR = true;
-
-		// Posicionar tabuleiro sobre o marcador
-		transform.position = trackedImage.transform.position;
-		transform.rotation = trackedImage.transform.rotation;
-
-		if (enableDebugLogs) Debug.Log($"BoardManager: Board placed on AR marker '{targetImageName}'");
-	}
-
-	private void UpdateBoardPositionAR(ARTrackedImage trackedImage)
-	{
-		if (boardPlacedInAR)
+		if (!boardPlacedInAR && imageTargetBehaviour != null)
 		{
-			// Seguir o marcador suavemente
-			transform.position = Vector3.Lerp(transform.position, trackedImage.transform.position, Time.deltaTime * 10f);
-			transform.rotation = Quaternion.Slerp(transform.rotation, trackedImage.transform.rotation, Time.deltaTime * 10f);
+			// Posicionar tabuleiro sobre o marcador
+			transform.SetParent(imageTargetBehaviour.transform);
+			transform.localPosition = Vector3.zero;
+			transform.localRotation = Quaternion.identity;
+			
+			boardPlacedInAR = true;
+
+			if (enableDebugLogs) Debug.Log($"BoardManager: Board placed on Vuforia marker '{targetImageName}'");
 		}
 	}
 
-	// Use essa função para lidar com o input, seja ele de mouse ou XR
+	private void OnVuforiaTargetLost()
+	{
+		if (enableDebugLogs) Debug.Log($"BoardManager: Vuforia marker '{targetImageName}' lost");
+		// Opcional: você pode ocultar o tabuleiro ou pausar o jogo
+	}
+
+	// Use essa função para lidar com o input de mouse ou touch
 	public void HandleSquareSelection(Vector3 worldPosition)
 	{
-		// Converte a posição do clique/toque no mundo para coordenadas do tabuleiro
-		int x = Mathf.FloorToInt(worldPosition.x / tileSize);
-		int y = Mathf.FloorToInt(worldPosition.z / tileSize);
+		// Converte a posição do clique/toque no MUNDO para coordenadas LOCAIS do tabuleiro
+		Vector3 local = transform.InverseTransformPoint(worldPosition);
+		local.x -= boardOriginOffsetLocal.x;
+		local.z -= boardOriginOffsetLocal.y;
+		int x = Mathf.FloorToInt(local.x / tileSize);
+		int y = Mathf.FloorToInt(local.z / tileSize);
 
 		// Garante que as coordenadas estão dentro do tabuleiro
 		if (x < 0 || x >= 8 || y < 0 || y >= 8) return;
@@ -212,69 +187,112 @@ public class BoardManager : MonoBehaviour
 		}
 		else
 		{
-			// Se uma peça já estiver selecionada, tenta mover para a casa clicada
-			MoveSelectedPiece(x, y);
+			if (pieceAtSelection != null)
+			{
+				if (pieceAtSelection.color == selectedPiece.color)
+				{
+					// Seleciona uma nova peça da mesma cor
+					SelectPiece(pieceAtSelection);
+				}
+				else if (selectedPiece == pieceAtSelection)
+				{
+					// Deseleciona a peça
+					DeselectPiece();
+				}
+				else
+				{
+					// Tenta mover para capturar a peça inimiga
+					MoveSelectedPiece(x, y);
+				}
+			}
+			else
+			{
+				// Se uma peça já estiver selecionada, tenta mover para a casa clicada
+				MoveSelectedPiece(x, y);
+			}
 		}
 	}
 
 	#region Private Methods
 
-	private void CreateBoard()
+	/// <summary>
+	/// Constrói o estado do tabuleiro (boardState) a partir das peças já existentes na cena.
+	/// Útil quando as peças foram posicionadas manualmente como filhos de WhitePieces/BlackPieces.
+	/// </summary>
+	private void SyncBoardFromScene()
 	{
-		// Cria o tabuleiro
-		for (int x = 0; x < 8; x++)
+		// Limpa a matriz
+		boardState = new ChessPiece[8, 8];
+
+		// Função local para registrar peça
+		void RegisterPiece(ChessPiece piece, PieceColor colorHint)
 		{
-			for (int y = 0; y < 8; y++)
+			if (piece == null) return;
+
+			// Calcula (x,y) a partir da posição mundial da peça
+			Vector3 local = transform.InverseTransformPoint(piece.transform.position);
+			local.x -= boardOriginOffsetLocal.x;
+			local.z -= boardOriginOffsetLocal.y;
+			int x = Mathf.RoundToInt(local.x / tileSize);
+			int y = Mathf.RoundToInt(local.z / tileSize);
+
+			// Garante limites
+			if (x < 0 || x > 7 || y < 0 || y > 7)
 			{
-				GameObject tilePrefab = ((x + y) % 2 == 0) ? whiteTilePrefab : blackTilePrefab;
-				Instantiate(tilePrefab, GetWorldPosition(x, y), Quaternion.identity, transform);
+				if (enableDebugLogs)
+					Debug.LogWarning($"SyncBoardFromScene: peça '{piece.name}' fora do tabuleiro em ({x},{y}). Ignorando.");
+				return;
 			}
+
+			// Define cor se possível pelo parent
+			if (whitePiecesParent != null && piece.transform.IsChildOf(whitePiecesParent.transform))
+				piece.color = PieceColor.Branco;
+			else if (blackPiecesParent != null && piece.transform.IsChildOf(blackPiecesParent.transform))
+				piece.color = PieceColor.Preto;
+			else
+				piece.color = colorHint; // fallback
+
+			// Configura referência ao board e coordenadas internas
+			piece.Setup(x, y, this);
+
+			// Registra na matriz
+			if (boardState[x, y] != null && boardState[x, y] != piece)
+			{
+				if (enableDebugLogs)
+					Debug.LogWarning($"SyncBoardFromScene: conflito em ({x},{y}). Substituindo '{boardState[x, y].name}' por '{piece.name}'.");
+			}
+			boardState[x, y] = piece;
 		}
 
-		// Exemplo simples de posicionamento inicial
-		// Você pode criar uma lógica mais robusta para isso
-
-		// peças brancas
-		SpawnPiece(0, 0, hookLeftPrefab, PieceColor.Branco);
-		SpawnPiece(1, 0, knightLeftPrefab, PieceColor.Branco);
-		SpawnPiece(2, 0, bishopLeftPrefab, PieceColor.Branco);
-		SpawnPiece(3, 0, queenPrefab, PieceColor.Branco);
-		SpawnPiece(4, 0, kingPrefab, PieceColor.Branco);
-		SpawnPiece(5, 0, bishopRightPrefab, PieceColor.Branco);
-		SpawnPiece(6, 0, knightRightPrefab, PieceColor.Branco);
-		SpawnPiece(7, 0, hookRightPrefab, PieceColor.Branco);
-		for (int i = 0; i < 8; i++)
+		// Percorre filhos de WhitePieces e BlackPieces
+		if (whitePiecesParent != null)
 		{
-			SpawnPiece(i, 1, pawnPrefabs[i], PieceColor.Branco);
+			var whitePieces = whitePiecesParent.GetComponentsInChildren<ChessPiece>(includeInactive: false);
+			foreach (var p in whitePieces) RegisterPiece(p, PieceColor.Branco);
+		}
+		if (blackPiecesParent != null)
+		{
+			var blackPieces = blackPiecesParent.GetComponentsInChildren<ChessPiece>(includeInactive: false);
+			foreach (var p in blackPieces) RegisterPiece(p, PieceColor.Preto);
 		}
 
-		// peças pretas
-		SpawnPiece(0, 7, hookLeftPrefab, PieceColor.Preto);
-		SpawnPiece(1, 7, knightLeftPrefab, PieceColor.Preto);
-		SpawnPiece(2, 7, bishopLeftPrefab, PieceColor.Preto);
-		SpawnPiece(3, 7, queenPrefab, PieceColor.Preto);
-		SpawnPiece(4, 7, kingPrefab, PieceColor.Preto);
-		SpawnPiece(5, 7, bishopRightPrefab, PieceColor.Preto);
-		SpawnPiece(6, 7, knightRightPrefab, PieceColor.Preto);
-		SpawnPiece(7, 7, hookRightPrefab, PieceColor.Preto);
-		for (int i = 0; i < 8; i++)
-		{
-			SpawnPiece(i, 6, pawnPrefabs[i], PieceColor.Preto);
-		}
+		if (enableDebugLogs) Debug.Log("BoardManager: boardState sincronizado a partir da cena.");
 	}
 
-	private void SpawnPiece(int x, int y, GameObject prefab, PieceColor color)
+	private void CreateBoard()
 	{
-		Texture2D materialToApply = (color == PieceColor.Branco) ? whitePiecesMaterial : blackPiecesMaterial;
+		if (boardParent == null)
+		{
+			// enviando um aviso na tela do jogador e fechando o jogo
+			Debug.LogError("BoardManager: boardParent is not assigned in the Inspector!");
+			return;
+		}
 
-		// Instancia o prefab na posição correta do mundo
-		GameObject pieceObject = Instantiate(prefab, GetWorldPosition(x, y), Quaternion.identity, transform);
-		pieceObject.name = $"{color}_{prefab.name}_({x},{y})";
-
-		ChessPiece pieceComponent = pieceObject.GetComponent<ChessPiece>();
-		pieceComponent.Setup(x, y, this); // Configura a peça com suas coordenadas e a referência ao BoardManager
-
-		boardState[x, y] = pieceComponent; // Adiciona a peça ao nosso estado de jogo
+		if (whitePiecesParent == null || blackPiecesParent == null)
+		{
+			Debug.LogError("BoardManager: whitePiecesParent or blackPiecesParent is not assigned in the Inspector!");
+			return;
+		}
 	}
 
 	private void SelectPiece(ChessPiece piece)
@@ -287,6 +305,11 @@ public class BoardManager : MonoBehaviour
 		ClearHighlights();
 		bool[,] validMoves = selectedPiece.GetValidMoves();
 		ShowValidMoves(validMoves);
+
+		if (enableDebugLogs)
+		{
+			Debug.Log($"Selected piece: {piece.type} at ({piece.currentX},{piece.currentY})");
+		}
 	}
 
 	private void DeselectPiece()
@@ -347,7 +370,7 @@ public class BoardManager : MonoBehaviour
 		// Atualiza a matriz do estado do jogo
 		boardState[piece.currentX, piece.currentY] = null;
 
-		// Move o objeto 3D
+		// Move o objeto 3D (usando espaço do tabuleiro)
 		piece.transform.position = GetWorldPosition(targetX, targetY);
 
 		piece.currentX = targetX;
@@ -429,6 +452,10 @@ public class BoardManager : MonoBehaviour
 					if (piece != null)
 					{
 						HandleSquareSelection(piece.transform.position);
+						if (enableDebugLogs)
+						{
+							Debug.Log($"Piece selected via raycast: {piece.type} at ({piece.currentX},{piece.currentY})");
+						}
 					}
 					else
 					{
@@ -510,31 +537,19 @@ public class BoardManager : MonoBehaviour
 			return true;
 		}
 
-		// 3) XR Origin camera (para VR) - busca pelo componente Camera filho de um objeto com "XR" no nome
-		var allCams = FindObjectsByType<Camera>(FindObjectsSortMode.None);
-		foreach (var cam in allCams)
+		// 3) Vuforia Camera
+		var vuforiaBehaviour = FindFirstObjectByType<VuforiaBehaviour>();
+		if (vuforiaBehaviour != null)
 		{
-			if (cam.transform.parent != null && (cam.transform.parent.name.Contains("XR") || cam.transform.parent.name.Contains("Origin")))
-			{
-				arCamera = cam;
-				if (logFound && enableDebugLogs) Debug.Log($"BoardManager: Using XR Origin Camera => {arCamera.name}");
-				return true;
-			}
-		}
-
-		// 4) AR Foundation ARCameraManager on a Camera (para AR)
-		var arCamMgr = FindFirstObjectByType<UnityEngine.XR.ARFoundation.ARCameraManager>();
-		if (arCamMgr != null)
-		{
-			arCamera = arCamMgr.GetComponent<Camera>();
+			arCamera = vuforiaBehaviour.GetComponent<Camera>();
 			if (arCamera != null)
 			{
-				if (logFound && enableDebugLogs) Debug.Log($"BoardManager: Using Camera with ARCameraManager => {arCamera.name}");
+				if (logFound && enableDebugLogs) Debug.Log($"BoardManager: Using Vuforia Camera => {arCamera.name}");
 				return true;
 			}
 		}
 
-		// 5) Any enabled camera in the scene
+		// 4) Any enabled camera in the scene
 		var cams = Camera.allCameras;
 		if (cams != null && cams.Length > 0)
 		{
@@ -548,10 +563,14 @@ public class BoardManager : MonoBehaviour
 
 	private void OnDestroy()
 	{
-		// Cleanup AR image tracking (AR Foundation 6.0)
-		if (trackedImageManager != null)
+		// Cleanup dos eventos do Vuforia
+		if (imageTargetBehaviour != null)
 		{
-			trackedImageManager.trackablesChanged.RemoveListener(OnTrackedImagesChanged);
+			var observerBehaviour = imageTargetBehaviour.GetComponent<ObserverBehaviour>();
+			if (observerBehaviour != null)
+			{
+				observerBehaviour.OnTargetStatusChanged -= OnVuforiaTargetStatusChanged;
+			}
 		}
 	}
 
@@ -576,9 +595,9 @@ public class BoardManager : MonoBehaviour
 
 	public Vector3 GetWorldPosition(int x, int y)
 	{
-		// Converte a coordenada do tabuleiro (ex: 0,0) para uma posição no mundo 3D
-		// Isso assume que o seu tabuleiro começa em (0, 0, 0)
-		return new Vector3(x * tileSize, 0, y * tileSize);
+		// Converte coordenadas do tabuleiro para posição no MUNDO, respeitando a transformação do tabuleiro (AR/ImageTarget)
+		Vector3 local = new Vector3(boardOriginOffsetLocal.x + x * tileSize, 0f, boardOriginOffsetLocal.y + y * tileSize);
+		return transform.TransformPoint(local);
 	}
 
 	// Helper para IA: retorna todas as peças de uma cor

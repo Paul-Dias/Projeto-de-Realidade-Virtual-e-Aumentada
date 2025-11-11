@@ -1,6 +1,5 @@
 using UnityEngine;
-using UnityEngine.XR.ARFoundation;
-using UnityEngine.XR.Interaction.Toolkit;
+using Vuforia;
 using UnityEngine.InputSystem;
 
 public class JumpOnTouch : MonoBehaviour
@@ -8,9 +7,6 @@ public class JumpOnTouch : MonoBehaviour
 	[Header("Jump Settings")]
 	[SerializeField] private float jumpHeight = 1f;
 	[SerializeField] private float jumpDuration = 0.5f;
-	
-	[Header("XR Settings")]
-	[SerializeField] private bool useXRInteraction = false;
 	
 	private Vector3 originalPosition;
 	private bool isJumping = false;
@@ -21,11 +17,21 @@ public class JumpOnTouch : MonoBehaviour
 	{
 		originalPosition = transform.position;
 
-		// Find the AR camera
+		// Find the camera (Vuforia or Main Camera)
 		arCamera = Camera.main;
 		if (arCamera == null)
 		{
-			// Try to find AR Camera if Camera.main is not set
+			// Try to find Vuforia Camera if Camera.main is not set
+			var vuforiaBehaviour = FindFirstObjectByType<VuforiaBehaviour>();
+			if (vuforiaBehaviour != null)
+			{
+				arCamera = vuforiaBehaviour.GetComponent<Camera>();
+			}
+		}
+		
+		if (arCamera == null)
+		{
+			// Fallback to any camera
 			arCamera = FindFirstObjectByType<Camera>();
 		}
 		
@@ -34,54 +40,43 @@ public class JumpOnTouch : MonoBehaviour
 		{
 			Debug.LogError($"JumpOnTouch: {gameObject.name} needs a Collider component to detect clicks!");
 		}
-		
-		// Add XR Interaction components if needed
-		if (useXRInteraction && GetComponent<UnityEngine.XR.Interaction.Toolkit.Interactables.XRSimpleInteractable>() == null)
-		{
-			var interactable = gameObject.AddComponent<UnityEngine.XR.Interaction.Toolkit.Interactables.XRSimpleInteractable>();
-			interactable.selectEntered.AddListener(OnXRSelect);
-		}
 	}
 	
 	private void Update()
 	{
 		// Handle touch/click input using the new Input System
-		if (!useXRInteraction)
+		bool inputDetected = false;
+		Vector2 inputPosition = Vector2.zero;
+		
+		// Touch input (mobile)
+		if (Touchscreen.current != null && Touchscreen.current.primaryTouch.press.wasPressedThisFrame)
 		{
-			bool inputDetected = false;
-			Vector2 inputPosition = Vector2.zero;
-			
-			// Touch input (mobile)
-			if (Touchscreen.current != null && Touchscreen.current.primaryTouch.press.wasPressedThisFrame)
+			inputDetected = true;
+			inputPosition = Touchscreen.current.primaryTouch.position.ReadValue();
+		}
+		// Mouse input (Editor/Standalone)
+		else if (Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame)
+		{
+			inputDetected = true;
+			inputPosition = Mouse.current.position.ReadValue();
+		}
+		
+		if (inputDetected)
+		{
+			if (arCamera == null)
 			{
-				inputDetected = true;
-				inputPosition = Touchscreen.current.primaryTouch.position.ReadValue();
+				Debug.LogError("JumpOnTouch: No camera found!");
+				return;
 			}
-			// Mouse input (Editor/Standalone)
-			else if (Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame)
-			{
-				inputDetected = true;
-				inputPosition = Mouse.current.position.ReadValue();
-			}
 			
-			if (inputDetected)
+			Ray ray = arCamera.ScreenPointToRay(inputPosition);
+			RaycastHit hit;
+			
+			if (Physics.Raycast(ray, out hit, Mathf.Infinity))
 			{
-				if (arCamera == null)
+				if (hit.collider.gameObject == gameObject || hit.collider.transform.IsChildOf(gameObject.transform))
 				{
-					Debug.LogError("JumpOnTouch: No camera found!");
-					return;
-				}
-				
-				Ray ray = arCamera.ScreenPointToRay(inputPosition);
-				RaycastHit hit;
-				
-
-				if (Physics.Raycast(ray, out hit, Mathf.Infinity))
-				{
-					if (hit.collider.gameObject == gameObject || hit.collider.transform.IsChildOf(gameObject.transform))
-					{
-						Jump();
-					}
+					Jump();
 				}
 			}
 		}
@@ -107,11 +102,6 @@ public class JumpOnTouch : MonoBehaviour
 		}
 	}
 	
-	private void OnXRSelect(SelectEnterEventArgs args)
-	{
-		Jump();
-	}
-	
 	public void Jump()
 	{
 		if (!isJumping)
@@ -119,16 +109,6 @@ public class JumpOnTouch : MonoBehaviour
 			originalPosition = transform.position;
 			isJumping = true;
 			jumpTimer = 0f;
-		}
-	}
-	
-	private void OnDestroy()
-	{
-		// Clean up XR events
-		var interactable = GetComponent<UnityEngine.XR.Interaction.Toolkit.Interactables.XRSimpleInteractable>();
-		if (interactable != null)
-		{
-			interactable.selectEntered.RemoveListener(OnXRSelect);
 		}
 	}
 }

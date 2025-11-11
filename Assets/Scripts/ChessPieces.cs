@@ -3,8 +3,9 @@ using UnityEngine;
 public abstract class ChessPiece : MonoBehaviour
 {
 	[Header("Piece Info")]
-	public PieceColor color;
-	[SerializeField] public PieceType type { get; protected set; }
+	[SerializeField] public PieceColor color;
+	[Tooltip("Tipo da peça de xadrez")]
+	[SerializeField] public PieceType type;
 
     // Posição da peça na matriz do tabuleiro (ex: 0 a 7)
     public int currentX { get; set; }
@@ -15,17 +16,17 @@ public abstract class ChessPiece : MonoBehaviour
 
 	private void SetupCollision()
 	{
-		// Pegando todos os "filhos" da peça (partes do modelo 3D) e adicionando colisores "MeshCollider" se não existirem
-		MeshRenderer[] renderers = GetComponentsInChildren<MeshRenderer>();
-		foreach (var renderer in renderers)
-		{
-			if (renderer.gameObject.GetComponent<Collider>() == null)
-			{
-				var collider = renderer.gameObject.AddComponent<MeshCollider>();
-				collider.convex = true; // Necessário para colisores em objetos móveis
-				collider.sharedMesh = renderer.GetComponent<MeshFilter>().sharedMesh;
-			}
-		}
+		// // Pegando todos os "filhos" da peça (partes do modelo 3D) e adicionando colisores "MeshCollider" se não existirem
+		// MeshRenderer[] renderers = GetComponentsInChildren<MeshRenderer>();
+		// foreach (var renderer in renderers)
+		// {
+		// 	if (renderer.gameObject.GetComponent<Collider>() == null)
+		// 	{
+		// 		var collider = renderer.gameObject.AddComponent<MeshCollider>();
+		// 		collider.convex = true; // Necessário para colisores em objetos móveis
+		// 		collider.sharedMesh = renderer.GetComponent<MeshFilter>().sharedMesh;
+		// 	}
+		// }
 	}
 
 	public bool hasEnemyOrBlank(int x, int y)

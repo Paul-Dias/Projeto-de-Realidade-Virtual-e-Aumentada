@@ -15,16 +15,13 @@ public class BoardManager : MonoBehaviour
 
 	[Header("Game State")]
 	private ChessPiece[,] boardState = new ChessPiece[8, 8];
+	private GameObject[,] boardTiles = new GameObject[8, 8];
 	private ChessPiece selectedPiece;
 	private List<GameObject> moveHighlights = new List<GameObject>(); // Para highlights visuais
 	public PieceColor currentPlayerColor = PieceColor.Branco;
 	public System.Action<PieceColor> OnTurnChanged;
 
 	[Header("Prefabs")]
-	[Tooltip("Instancia pai das peças brancas")]
-	[SerializeField] private GameObject whitePiecesParent;
-	[Tooltip("Instancia pai das peças pretas")]
-	[SerializeField] private GameObject blackPiecesParent;
 	[Tooltip("Instancia pai do tabuleiro")]
 	[SerializeField] private GameObject boardParent;
 
@@ -33,10 +30,17 @@ public class BoardManager : MonoBehaviour
 	[Header("Configurações do Tabuleiro")]
 	[Tooltip("Tamanho de cada casa do tabuleiro.")]
 	[SerializeField] private float tileSize = 1.0f; // Tamanho de cada casa do tabuleiro
-	[Tooltip("Offset local (X,Z) do canto inferior esquerdo (0,0) do tabuleiro em relação ao pivot do GameObject do Board.")]
-	[SerializeField] private Vector2 boardOriginOffsetLocal = Vector2.zero;
 	[SerializeField] private bool enableDebugLogs = false;
+
+	[Header("Animação de Movimento")]
+	[Tooltip("Duração da animação de movimento das peças (em segundos)")]
+	[SerializeField] private float moveDuration = 0.5f;
+	[Tooltip("Altura do pulo do cavalo")]
+	[SerializeField] private float horseJumpHeight = 0.0000000015f;
+	private bool isAnimating = false;
 	[SerializeField] private Camera arCamera; // Permite atribuir manualmente no Inspector
+	// [Tooltip("Offset local (X,Z) do canto inferior esquerdo (0,0) do tabuleiro em relação ao pivot do GameObject do Board.")]
+	private Vector2 boardOriginOffsetLocal = Vector2.zero;
 
 	[Header("AR Image Tracking")]
 	[Tooltip("Nome do Image Target configurado no Vuforia")]
@@ -66,6 +70,8 @@ public class BoardManager : MonoBehaviour
 				break;
 		}
 
+		boardOriginOffsetLocal = new Vector2(-3.5f * tileSize, -3.5f * tileSize);
+
 		CreateBoard();
 
 		// Resolve AR/Camera reference
@@ -76,10 +82,6 @@ public class BoardManager : MonoBehaviour
 
 		// Guardar rotação inicial do tabuleiro
 		initialBoardRotation = transform.rotation;
-		
-		// Como o tabuleiro e as peças já estão posicionados na cena (AR/ImageTarget),
-		// sincronizamos o estado interno do jogo a partir dos objetos existentes.
-		SyncBoardFromScene();
 	}
 
 	private void SetupStandaloneMobile()
@@ -172,29 +174,52 @@ public class BoardManager : MonoBehaviour
 		int x = Mathf.FloorToInt(local.x / tileSize);
 		int y = Mathf.FloorToInt(local.z / tileSize);
 
-		// Garante que as coordenadas estão dentro do tabuleiro
-		if (x < 0 || x >= 8 || y < 0 || y >= 8) return;
+		if (x < 0 || x >= 8 || y < 0 || y >= 8) {
+			Debug.LogWarning($"HandleSquareSelection: Coordinates out of bounds ({x},{y})");
+			return;
+		}
 
 		ChessPiece pieceAtSelection = GetPieceAt(x, y);
+		if (pieceAtSelection != null)
+		{
+			HandleSquareSelection(pieceAtSelection);
+			return;
+		}
+	}
+	public void HandleSquareSelection(ChessPiece piece)
+	{
+
+		int x = piece.currentX;
+		int y = piece.currentY;
+
+		// Garante que as coordenadas estão dentro do tabuleiro
+		if (x < 0 || x >= 8 || y < 0 || y >= 8) {
+			Debug.LogWarning($"HandleSquareSelection: Coordinates out of bounds ({x},{y})");
+			return;
+		}
 
 		if (selectedPiece == null)
 		{
 			// Se nenhuma peça estiver selecionada, seleciona a peça clicada
-			if (pieceAtSelection != null)
+			if (piece != null)
 			{
-				SelectPiece(pieceAtSelection);
+				if (piece.color == currentPlayerColor)
+				{
+					Debug.Log("BoardManager: No piece selected, selecting clicked piece.");
+					SelectPiece(piece);
+				}
 			}
 		}
 		else
 		{
-			if (pieceAtSelection != null)
+			if (piece != null)
 			{
-				if (pieceAtSelection.color == selectedPiece.color)
+				if (piece.color == selectedPiece.color)
 				{
 					// Seleciona uma nova peça da mesma cor
-					SelectPiece(pieceAtSelection);
+					SelectPiece(piece);
 				}
-				else if (selectedPiece == pieceAtSelection)
+				else if (selectedPiece == piece)
 				{
 					// Deseleciona a peça
 					DeselectPiece();
@@ -215,70 +240,6 @@ public class BoardManager : MonoBehaviour
 
 	#region Private Methods
 
-	/// <summary>
-	/// Constrói o estado do tabuleiro (boardState) a partir das peças já existentes na cena.
-	/// Útil quando as peças foram posicionadas manualmente como filhos de WhitePieces/BlackPieces.
-	/// </summary>
-	private void SyncBoardFromScene()
-	{
-		// Limpa a matriz
-		boardState = new ChessPiece[8, 8];
-
-		// Função local para registrar peça
-		void RegisterPiece(ChessPiece piece, PieceColor colorHint)
-		{
-			if (piece == null) return;
-
-			// Calcula (x,y) a partir da posição mundial da peça
-			Vector3 local = transform.InverseTransformPoint(piece.transform.position);
-			local.x -= boardOriginOffsetLocal.x;
-			local.z -= boardOriginOffsetLocal.y;
-			int x = Mathf.RoundToInt(local.x / tileSize);
-			int y = Mathf.RoundToInt(local.z / tileSize);
-
-			// Garante limites
-			if (x < 0 || x > 7 || y < 0 || y > 7)
-			{
-				if (enableDebugLogs)
-					Debug.LogWarning($"SyncBoardFromScene: peça '{piece.name}' fora do tabuleiro em ({x},{y}). Ignorando.");
-				return;
-			}
-
-			// Define cor se possível pelo parent
-			if (whitePiecesParent != null && piece.transform.IsChildOf(whitePiecesParent.transform))
-				piece.color = PieceColor.Branco;
-			else if (blackPiecesParent != null && piece.transform.IsChildOf(blackPiecesParent.transform))
-				piece.color = PieceColor.Preto;
-			else
-				piece.color = colorHint; // fallback
-
-			// Configura referência ao board e coordenadas internas
-			piece.Setup(x, y, this);
-
-			// Registra na matriz
-			if (boardState[x, y] != null && boardState[x, y] != piece)
-			{
-				if (enableDebugLogs)
-					Debug.LogWarning($"SyncBoardFromScene: conflito em ({x},{y}). Substituindo '{boardState[x, y].name}' por '{piece.name}'.");
-			}
-			boardState[x, y] = piece;
-		}
-
-		// Percorre filhos de WhitePieces e BlackPieces
-		if (whitePiecesParent != null)
-		{
-			var whitePieces = whitePiecesParent.GetComponentsInChildren<ChessPiece>(includeInactive: false);
-			foreach (var p in whitePieces) RegisterPiece(p, PieceColor.Branco);
-		}
-		if (blackPiecesParent != null)
-		{
-			var blackPieces = blackPiecesParent.GetComponentsInChildren<ChessPiece>(includeInactive: false);
-			foreach (var p in blackPieces) RegisterPiece(p, PieceColor.Preto);
-		}
-
-		if (enableDebugLogs) Debug.Log("BoardManager: boardState sincronizado a partir da cena.");
-	}
-
 	private void CreateBoard()
 	{
 		if (boardParent == null)
@@ -288,10 +249,30 @@ public class BoardManager : MonoBehaviour
 			return;
 		}
 
-		if (whitePiecesParent == null || blackPiecesParent == null)
+		foreach (Transform row in boardParent.GetComponentsInChildren<Transform>())
 		{
-			Debug.LogError("BoardManager: whitePiecesParent or blackPiecesParent is not assigned in the Inspector!");
-			return;
+			if (row.parent != boardParent.transform) continue; // só linhas diretas
+
+			foreach (Transform tile in row.GetComponentsInChildren<Transform>())
+			{
+				if (tile.parent != row) continue; // só tiles diretas
+
+				// Calcula coordenadas x,y baseadas na hierarquia
+				int x = tile.GetSiblingIndex();
+				int y = row.GetSiblingIndex();
+
+				boardTiles[x, y] = tile.gameObject;
+				ChessPiece piece = tile.GetComponentInChildren<ChessPiece>();
+				if (piece != null)
+				{
+					piece.Setup(x, y, this);
+					boardState[x, y] = piece;
+					if (enableDebugLogs)
+					{
+						Debug.Log($"BoardManager: Registered piece '{piece.color}' '{piece.type}' at ({x},{y})");
+					}
+				}
+			}
 		}
 	}
 
@@ -333,19 +314,22 @@ public class BoardManager : MonoBehaviour
 	private void MoveSelectedPiece(int targetX, int targetY)
 	{
 		if (selectedPiece == null) return;
+		if (isAnimating) return; // Não permite novo movimento durante animação
 		
 		if (!CanMakeMove(targetX, targetY)) return;
 		
 		// Executa o movimento
 		ExecuteMove(selectedPiece, targetX, targetY);
 		
-		// Troca de turno
-		ToggleTurn();
+		// Troca de turno (agora será chamado após a animação)
+		StartCoroutine(ToggleTurnAfterAnimation());
 	}
 
 	// Método público para IA ou outros sistemas moverem uma peça diretamente
 	public bool TryMakeMove(int fromX, int fromY, int toX, int toY)
 	{
+		if (isAnimating) return false; // Não permite movimento durante animação
+		
 		ChessPiece piece = GetPieceAt(fromX, fromY);
 		if (piece == null) return false;
 		if (piece.color != currentPlayerColor) return false;
@@ -354,38 +338,93 @@ public class BoardManager : MonoBehaviour
 		if (!validMoves[toX, toY]) return false;
 		
 		ExecuteMove(piece, toX, toY);
-		ToggleTurn();
+		StartCoroutine(ToggleTurnAfterAnimation());
 		return true;
 	}
 
 	private void ExecuteMove(ChessPiece piece, int targetX, int targetY)
 	{
-		// Captura
+		// Inicia a animação de movimento
+		StartCoroutine(AnimateMove(piece, targetX, targetY));
+	}
+
+	private System.Collections.IEnumerator AnimateMove(ChessPiece piece, int targetX, int targetY)
+	{
+		isAnimating = true;
+
+		// Captura a peça inimiga se existir
 		ChessPiece pieceToCapture = GetPieceAt(targetX, targetY);
 		if (pieceToCapture != null)
 		{
 			Destroy(pieceToCapture.gameObject);
 		}
 
+		// Posições inicial e final
+		Vector3 startPos = piece.transform.position;
+		Vector3 endPos = GetWorldPosition(targetX, targetY);
+
+		// Determina se é um cavalo para fazer animação de pulo
+		bool isHorse = (piece.type == PieceType.Cavalo);
+
+		// Anima o movimento
+		float elapsed = 0f;
+		while (elapsed < moveDuration)
+		{
+			elapsed += Time.deltaTime;
+			float t = elapsed / moveDuration;
+
+			if (isHorse)
+			{
+				// Cavalo: movimento com pulo (parábola)
+				Vector3 currentPos = Vector3.Lerp(startPos, endPos, t);
+				// Adiciona altura parabólica (sin para criar arco)
+				float height = Mathf.Sin(t * Mathf.PI) * horseJumpHeight;
+				currentPos.y = startPos.y + height;
+				piece.transform.position = currentPos;
+			}
+			else
+			{
+				// Outras peças: movimento arrastado (lerp suave)
+				piece.transform.position = Vector3.Lerp(startPos, endPos, t);
+			}
+
+			yield return null;
+		}
+
+		// Garante que a peça chegue exatamente na posição final
+		piece.transform.position = endPos;
+
 		// Atualiza a matriz do estado do jogo
 		boardState[piece.currentX, piece.currentY] = null;
-
-		// Move o objeto 3D (usando espaço do tabuleiro)
-		piece.transform.position = GetWorldPosition(targetX, targetY);
-
 		piece.currentX = targetX;
 		piece.currentY = targetY;
 		boardState[targetX, targetY] = piece;
 
+		// Atualiza o parent para o tile de destino
+		GameObject tile = boardTiles[targetX, targetY];
+		piece.transform.SetParent(tile.transform);
+
 		// Limpa seleção e highlights
 		selectedPiece = null;
 		ClearHighlights();
+
+		isAnimating = false;
 	}
 
 	private void ToggleTurn()
 	{
 		currentPlayerColor = (currentPlayerColor == PieceColor.Branco) ? PieceColor.Preto : PieceColor.Branco;
 		OnTurnChanged?.Invoke(currentPlayerColor);
+	}
+
+	private System.Collections.IEnumerator ToggleTurnAfterAnimation()
+	{
+		// Aguarda a animação terminar
+		while (isAnimating)
+		{
+			yield return null;
+		}
+		ToggleTurn();
 	}
 
 	private void ShowValidMoves(bool[,] moves)
@@ -396,8 +435,22 @@ public class BoardManager : MonoBehaviour
 			{
 				if (moves[i, j])
 				{
+					GameObject tile = boardTiles[i, j];
 					GameObject go = Instantiate(highlightPrefab, GetWorldPosition(i, j), Quaternion.identity, transform);
+
+					// Adiciona ou obtém o componente HighlightSquare
+					HighlightSquare highlightScript = go.GetComponent<HighlightSquare>();
+					if (highlightScript == null)
+					{
+						highlightScript = go.AddComponent<HighlightSquare>();
+					}
+
+					// Configura as coordenadas do destino
+					highlightScript.Setup(i, j, this);
+
 					moveHighlights.Add(go);
+
+					go.transform.SetParent(tile.transform);
 				}
 			}
 		}
@@ -444,6 +497,23 @@ public class BoardManager : MonoBehaviour
 			{
 				Debug.Log($"Raycast hit: {hit.collider.gameObject.name}");
 
+				// Se objeto for um HighlightSquare, lida com a seleção diretamente
+				if (hit.collider.gameObject.GetComponent<HighlightSquare>() != null)
+				{
+					try {
+						HighlightSquare highlight = hit.collider.gameObject.GetComponent<HighlightSquare>();
+						OnHighlightClicked(highlight.targetX, highlight.targetY);
+						if (enableDebugLogs)
+						{
+							Debug.Log($"HighlightSquare selected at ({highlight.targetX},{highlight.targetY})");
+						}
+						return;
+					} catch (System.Exception ex)
+					{
+						Debug.LogError($"Error handling HighlightSquare selection: {ex.Message}");
+					}
+				}
+
 				// Verificando se o objeto clicado é uma peça ou parte dela
 				try
 				{
@@ -451,10 +521,10 @@ public class BoardManager : MonoBehaviour
 					// Se for uma peça, tenta selecionar a peça
 					if (piece != null)
 					{
-						HandleSquareSelection(piece.transform.position);
+						HandleSquareSelection(piece);
 						if (enableDebugLogs)
 						{
-							Debug.Log($"Piece selected via raycast: {piece.type} at ({piece.currentX},{piece.currentY})");
+							Debug.Log($"Piece selected via raycast: {piece.type}-{piece.color} at ({piece.currentX},{piece.currentY})");
 						}
 					}
 					else
@@ -595,6 +665,13 @@ public class BoardManager : MonoBehaviour
 
 	public Vector3 GetWorldPosition(int x, int y)
 	{
+		GameObject tile = boardTiles[x, y];
+		if (tile != null)
+		{
+			Vector3 position = tile.transform.position;
+			// return new Vector3(position.x, 0f, position.z);
+			return position;
+		}
 		// Converte coordenadas do tabuleiro para posição no MUNDO, respeitando a transformação do tabuleiro (AR/ImageTarget)
 		Vector3 local = new Vector3(boardOriginOffsetLocal.x + x * tileSize, 0f, boardOriginOffsetLocal.y + y * tileSize);
 		return transform.TransformPoint(local);
@@ -620,6 +697,15 @@ public class BoardManager : MonoBehaviour
 	public bool InBounds(int x, int y)
 	{
 		return x >= 0 && x < 8 && y >= 0 && y < 8;
+	}
+
+	// Método chamado pelos highlights quando clicados
+	public void OnHighlightClicked(int x, int y)
+	{
+		if (selectedPiece != null && !isAnimating)
+		{
+			MoveSelectedPiece(x, y);
+		}
 	}
 
 	#endregion

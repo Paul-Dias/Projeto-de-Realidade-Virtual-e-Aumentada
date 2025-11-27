@@ -2,10 +2,6 @@ using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
 
-/// <summary>
-/// IA de Xadrez com dificuldade média.
-/// Usa avaliação de material + mobilidade e busca minimax com profundidade limitada.
-/// </summary>
 public class ChessAI : MonoBehaviour
 {
 	[Header("AI Settings")]
@@ -20,11 +16,10 @@ public class ChessAI : MonoBehaviour
 	
 	[Header("References")]
 	[SerializeField] private BoardManager boardManager;
-	
+
 	private bool isThinking = false;
-	
-	// Valores das peças (centipawns - centésimos de peão)
-	private readonly Dictionary<System.Type, int> pieceValues = new Dictionary<System.Type, int>
+
+	private readonly Dictionary<System.Type, int> pieceValues = new()
 	{
 		{ typeof(Pawn), 100 },
 		{ typeof(Cavalo), 320 },
@@ -33,299 +28,299 @@ public class ChessAI : MonoBehaviour
 		{ typeof(Queen), 900 },
 		{ typeof(Rei), 20000 }
 	};
-	
+
+	// Evitar movimentos de vai-e-volta e melhorar segurança do rei
+	private ChessMove lastMove;
+	[SerializeField, Range(0f, 1000f)] private float repetitionPenalty = 200f;
+	[SerializeField, Range(0f, 2000f)] private float kingInCheckPenalty = 1500f;
+	[SerializeField, Range(0f, 500f)] private float kingZoneThreatPenalty = 50f;
+
 	private void Start()
 	{
-		if (boardManager == null)
-		{
-			boardManager = FindFirstObjectByType<BoardManager>();
-		}
-		
-		if (boardManager != null)
-		{
-			boardManager.OnTurnChanged += OnTurnChanged;
-			
-			// Se a IA joga com brancas, faz o primeiro movimento
-			if (aiColor == PieceColor.Branco && boardManager.currentPlayerColor == PieceColor.Branco)
-			{
-				Invoke(nameof(MakeAIMove), thinkingDelay);
-			}
-		}
-		else
-		{
-			Debug.LogError("ChessAI: BoardManager não encontrado!");
-		}
+		if (!boardManager) boardManager = FindFirstObjectByType<BoardManager>();
+		if (!boardManager) { Debug.LogError("ChessAI: BoardManager não encontrado!"); return; }
+
+		boardManager.OnTurnChanged += OnTurnChanged;
+		if (aiColor == boardManager.currentPlayerColor)
+			Invoke(nameof(MakeAIMove), thinkingDelay);
 	}
-	
+
 	private void OnDestroy()
 	{
-		if (boardManager != null)
-		{
-			boardManager.OnTurnChanged -= OnTurnChanged;
-		}
+		if (boardManager) boardManager.OnTurnChanged -= OnTurnChanged;
 	}
-	
+
 	private void OnTurnChanged(PieceColor newPlayer)
 	{
 		if (newPlayer == aiColor && !isThinking)
-		{
 			Invoke(nameof(MakeAIMove), thinkingDelay);
-		}
 	}
-	
+
 	private void MakeAIMove()
 	{
 		if (isThinking) return;
 		isThinking = true;
-		
-		// Busca o melhor movimento
+
 		var bestMove = FindBestMove();
-		
+
 		if (bestMove != null)
 		{
-			// Executa o movimento
 			bool success = boardManager.TryMakeMove(bestMove.fromX, bestMove.fromY, bestMove.toX, bestMove.toY);
-			
+			Debug.Log(success
+				? $"AI: {bestMove.piece.GetType().Name} ({bestMove.fromX},{bestMove.fromY})→({bestMove.toX},{bestMove.toY}) [{bestMove.score:F0}]"
+				: "AI: Falha ao mover!");
+
 			if (success)
 			{
-				Debug.Log($"ChessAI: Moveu {bestMove.piece.GetType().Name} de ({bestMove.fromX},{bestMove.fromY}) para ({bestMove.toX},{bestMove.toY}) - Avaliação: {bestMove.score}");
-			}
-			else
-			{
-				Debug.LogError($"ChessAI: Falha ao executar movimento!");
+				lastMove = bestMove; // Atualiza último movimento para evitar vai-e-volta
 			}
 		}
-		else
-		{
-			Debug.LogWarning("ChessAI: Nenhum movimento válido encontrado!");
-		}
-		
+		else Debug.LogWarning("AI: Nenhum movimento válido.");
+
 		isThinking = false;
 	}
-	
+
 	private ChessMove FindBestMove()
 	{
-		List<ChessMove> allMoves = GenerateAllMoves(aiColor);
-		
+		var allMoves = GenerateAllMoves(aiColor);
 		if (allMoves.Count == 0) return null;
-		
-		ChessMove bestMove = null;
+
 		float bestScore = float.NegativeInfinity;
-		
-		// Avalia cada movimento possível
+		ChessMove bestMove = null;
+
 		foreach (var move in allMoves)
 		{
-			// Simula o movimento
-			var capturedPiece = SimulateMove(move);
-			
-			// Avalia a posição resultante (minimax com profundidade limitada)
+			var captured = SimulateMove(move);
 			float score = -Minimax(searchDepth - 1, float.NegativeInfinity, float.PositiveInfinity, false);
-			
-			// Desfaz o movimento
-			UndoMove(move, capturedPiece);
-			
-			// Atualiza o melhor movimento
+
+			// Penaliza repetição imediata (voltar para a casa anterior)
+			if (lastMove != null &&
+				move.piece == lastMove.piece &&
+				move.fromX == lastMove.toX && move.fromY == lastMove.toY &&
+				move.toX == lastMove.fromX && move.toY == lastMove.fromY)
+			{
+				score -= repetitionPenalty;
+			}
+			UndoMove(move, captured);
+
 			if (score > bestScore)
 			{
 				bestScore = score;
 				bestMove = move;
 			}
 		}
-		
-		if (bestMove != null)
-		{
-			bestMove.score = bestScore;
-		}
-		
+
+		if (bestMove != null) bestMove.score = bestScore;
 		return bestMove;
 	}
-	
-	/// <summary>
-	/// Algoritmo Minimax com poda alpha-beta
-	/// </summary>
+
 	private float Minimax(int depth, float alpha, float beta, bool isMaximizing)
 	{
-		if (depth == 0)
-		{
-			return EvaluatePosition();
-		}
-		
-		PieceColor currentColor = isMaximizing ? aiColor : GetOpponentColor(aiColor);
-		List<ChessMove> moves = GenerateAllMoves(currentColor);
-		
+		if (depth == 0) return EvaluatePosition();
+
+		PieceColor current = isMaximizing ? aiColor : GetOpponentColor(aiColor);
+		var moves = GenerateAllMoves(current);
+
 		if (moves.Count == 0)
-		{
-			// Sem movimentos = xeque-mate ou empate
 			return isMaximizing ? -999999 : 999999;
-		}
-		
+
 		if (isMaximizing)
 		{
 			float maxEval = float.NegativeInfinity;
-			
-			foreach (var move in moves)
+			foreach (var m in moves)
 			{
-				var captured = SimulateMove(move);
+				var captured = SimulateMove(m);
 				float eval = Minimax(depth - 1, alpha, beta, false);
-				UndoMove(move, captured);
-				
+				UndoMove(m, captured);
+
 				maxEval = Mathf.Max(maxEval, eval);
 				alpha = Mathf.Max(alpha, eval);
-				
-				if (beta <= alpha)
-					break; // Poda beta
+				if (beta <= alpha) break;
 			}
-			
 			return maxEval;
 		}
 		else
 		{
 			float minEval = float.PositiveInfinity;
-			
-			foreach (var move in moves)
+			foreach (var m in moves)
 			{
-				var captured = SimulateMove(move);
+				var captured = SimulateMove(m);
 				float eval = Minimax(depth - 1, alpha, beta, true);
-				UndoMove(move, captured);
-				
+				UndoMove(m, captured);
+
 				minEval = Mathf.Min(minEval, eval);
 				beta = Mathf.Min(beta, eval);
-				
-				if (beta <= alpha)
-					break; // Poda alpha
+				if (beta <= alpha) break;
 			}
-			
 			return minEval;
 		}
 	}
-	
-	/// <summary>
-	/// Avalia a posição atual do tabuleiro do ponto de vista da IA
-	/// Positivo = bom para IA, Negativo = bom para oponente
-	/// </summary>
+
 	private float EvaluatePosition()
 	{
 		float score = 0f;
-		
-		// 1. Material (valor das peças)
-		score += EvaluateMaterial(aiColor);
-		score -= EvaluateMaterial(GetOpponentColor(aiColor));
-		
-		// 2. Mobilidade (número de movimentos válidos)
-		score += GenerateAllMoves(aiColor).Count * 10;
-		score -= GenerateAllMoves(GetOpponentColor(aiColor)).Count * 10;
-		
-		// 3. Controle do centro (bônus para peças no centro)
-		score += EvaluateCenterControl(aiColor) * 30;
-		score -= EvaluateCenterControl(GetOpponentColor(aiColor)) * 30;
-		
+
+		var myPieces = boardManager.GetPieces(aiColor);
+		var enemyPieces = boardManager.GetPieces(GetOpponentColor(aiColor));
+
+		// Material
+		score += myPieces.Sum(p => pieceValues[p.GetType()]);
+		score -= enemyPieces.Sum(p => pieceValues[p.GetType()]);
+
+		// Mobilidade
+		int myMoves = myPieces.Sum(p => p.GetValidMoves().Cast<bool>().Count(v => v));
+		int oppMoves = enemyPieces.Sum(p => p.GetValidMoves().Cast<bool>().Count(v => v));
+		score += (myMoves - oppMoves) * 5;
+
+		// Centro
+		score += (EvaluateCenterControl(aiColor) - EvaluateCenterControl(GetOpponentColor(aiColor))) * 25;
+
+		// Desenvolvimento
+		score += EvaluateDevelopment(myPieces) * 3;
+
+		// Segurança do Rei (priorizar defesa)
+		score += EvaluateKingSafety(aiColor);
+		score -= EvaluateKingSafety(GetOpponentColor(aiColor));
+
+		// Ameaças (capturas possíveis)
+		score += EvaluateThreats(aiColor) * 10;
+		score -= EvaluateThreats(GetOpponentColor(aiColor)) * 10;
+
 		return score;
 	}
-	
-	private float EvaluateMaterial(PieceColor color)
+
+	private float EvaluateKingSafety(PieceColor color)
 	{
-		float material = 0f;
-		
-		foreach (var piece in boardManager.GetPieces(color))
+		var king = GetKing(color);
+		if (king == null) return 0f;
+
+		int kingX = king.currentX;
+		int kingY = king.currentY;
+
+		// Penalidade se o rei estiver sob ataque direto (estimativa via movimentos inimigos atuais)
+		PieceColor opponent = GetOpponentColor(color);
+		float penalty = 0f;
+
+		foreach (var p in boardManager.GetPieces(opponent))
 		{
-			var pieceType = piece.GetType();
-			if (pieceValues.ContainsKey(pieceType))
+			var moves = p.GetValidMoves();
+			if (moves[kingX, kingY])
 			{
-				material += pieceValues[pieceType];
+				penalty += kingInCheckPenalty;
 			}
-		}
-		
-		return material;
-	}
-	
-	private float EvaluateCenterControl(PieceColor color)
-	{
-		float centerControl = 0f;
-		int[] centerSquares = { 27, 28, 35, 36 }; // d4, e4, d5, e5 (em índice linear)
-		
-		foreach (var piece in boardManager.GetPieces(color))
-		{
-			int index = piece.currentY * 8 + piece.currentX;
-			if (System.Array.IndexOf(centerSquares, index) >= 0)
+
+			// Penaliza ataques à zona ao redor do rei (8 casas adjacentes)
+			for (int dx = -1; dx <= 1; dx++)
 			{
-				centerControl += 1f;
-			}
-		}
-		
-		return centerControl;
-	}
-	
-	private List<ChessMove> GenerateAllMoves(PieceColor color)
-	{
-		List<ChessMove> moves = new List<ChessMove>();
-		
-		foreach (var piece in boardManager.GetPieces(color))
-		{
-			bool[,] validMoves = piece.GetValidMoves();
-			
-			for (int x = 0; x < 8; x++)
-			{
-				for (int y = 0; y < 8; y++)
+				for (int dy = -1; dy <= 1; dy++)
 				{
-					if (validMoves[x, y])
+					if (dx == 0 && dy == 0) continue;
+					int nx = kingX + dx;
+					int ny = kingY + dy;
+					if (nx >= 0 && nx < 8 && ny >= 0 && ny < 8)
 					{
-						moves.Add(new ChessMove
-						{
-							piece = piece,
-							fromX = piece.currentX,
-							fromY = piece.currentY,
-							toX = x,
-							toY = y
-						});
+						if (moves[nx, ny]) penalty += kingZoneThreatPenalty;
 					}
 				}
 			}
 		}
-		
+
+		// Pequeno bônus por peças amigas protegendo a zona do rei (bloqueando ou ocupando casas adjacentes)
+		float protection = 0f;
+		foreach (var p in boardManager.GetPieces(color))
+		{
+			var moves = p.GetValidMoves();
+			for (int dx = -1; dx <= 1; dx++)
+			{
+				for (int dy = -1; dy <= 1; dy++)
+				{
+					if (dx == 0 && dy == 0) continue;
+					int nx = kingX + dx;
+					int ny = kingY + dy;
+					if (nx >= 0 && nx < 8 && ny >= 0 && ny < 8)
+					{
+						if (moves[nx, ny]) protection += 10f; // pequeno bônus
+					}
+				}
+			}
+		}
+
+		return -penalty + protection;
+	}
+
+	private ChessPiece GetKing(PieceColor color)
+	{
+		foreach (var p in boardManager.GetPieces(color))
+		{
+			if (p.GetType() == typeof(Rei)) return p;
+		}
+		return null;
+	}
+
+	private float EvaluateCenterControl(PieceColor color)
+	{
+		int[] center = { 27, 28, 35, 36 };
+		return boardManager.GetPieces(color)
+			.Count(p => center.Contains(p.currentY * 8 + p.currentX));
+	}
+
+	private float EvaluateDevelopment(IEnumerable<ChessPiece> pieces)
+	{
+		// Penaliza peças ainda na linha inicial (menos mobilidade)
+		return pieces.Count(p => p.currentY != (p.color == PieceColor.Branco ? 1 : 6));
+	}
+
+	private int EvaluateThreats(PieceColor color)
+	{
+		int threats = 0;
+		foreach (var p in boardManager.GetPieces(color))
+		{
+			var moves = p.GetValidMoves();
+			for (int x = 0; x < 8; x++)
+				for (int y = 0; y < 8; y++)
+					if (moves[x, y] && boardManager.GetPieceAt(x, y) != null)
+						threats++;
+		}
+		return threats;
+	}
+
+	private List<ChessMove> GenerateAllMoves(PieceColor color)
+	{
+		var moves = new List<ChessMove>();
+		foreach (var p in boardManager.GetPieces(color))
+		{
+			var valid = p.GetValidMoves();
+			for (int x = 0; x < 8; x++)
+				for (int y = 0; y < 8; y++)
+					if (valid[x, y])
+						moves.Add(new ChessMove { piece = p, fromX = p.currentX, fromY = p.currentY, toX = x, toY = y });
+		}
 		return moves;
 	}
-	
+
 	private ChessPiece SimulateMove(ChessMove move)
 	{
-		// Captura peça se houver
-		ChessPiece captured = boardManager.GetPieceAt(move.toX, move.toY);
-		
-		// Atualiza referências temporariamente
-		var oldX = move.piece.currentX;
-		var oldY = move.piece.currentY;
-		
+		var captured = boardManager.GetPieceAt(move.toX, move.toY);
 		move.piece.currentX = move.toX;
 		move.piece.currentY = move.toY;
-		
-		// Não mexe no GameObject 3D durante simulação
-		
 		return captured;
 	}
-	
-	private void UndoMove(ChessMove move, ChessPiece capturedPiece)
+
+	private void UndoMove(ChessMove move, ChessPiece captured)
 	{
-		// Restaura posição da peça
 		move.piece.currentX = move.fromX;
 		move.piece.currentY = move.fromY;
-		
-		// Restaura peça capturada (só referência, não recria GameObject)
 	}
-	
+
 	private PieceColor GetOpponentColor(PieceColor color)
 	{
 		return color == PieceColor.Branco ? PieceColor.Preto : PieceColor.Branco;
 	}
 }
 
-/// <summary>
-/// Estrutura para representar um movimento de xadrez
-/// </summary>
 public class ChessMove
 {
 	public ChessPiece piece;
-	public int fromX;
-	public int fromY;
-	public int toX;
-	public int toY;
+	public int fromX, fromY, toX, toY;
 	public float score;
 }

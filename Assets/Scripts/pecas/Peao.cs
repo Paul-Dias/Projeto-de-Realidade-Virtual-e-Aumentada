@@ -1,3 +1,5 @@
+using UnityEngine;
+
 public class Pawn : ChessPiece
 {
     public override bool[,] GetValidMoves()
@@ -34,7 +36,24 @@ public class Pawn : ChessPiece
             validMoves[currentX + 1, nextY] = true;
         }
 
-        // Aqui você adicionaria a lógica para o primeiro movimento duplo, en passant, etc.
+        // En Passant
+        if (boardManager != null)
+        {
+            // Verifica se o último movimento foi de um peão inimigo que andou 2 casas
+            var lastMoved = boardManager.lastMovedPiece;
+            if (lastMoved != null && 
+                lastMoved.type == PieceType.Peao && 
+                lastMoved.color != color &&
+                Mathf.Abs(boardManager.lastMoveToY - boardManager.lastMoveFromY) == 2)
+            {
+                // Verifica se está ao lado do peão que acabou de se mover
+                if (lastMoved.currentY == currentY && Mathf.Abs(lastMoved.currentX - currentX) == 1)
+                {
+                    // Pode capturar en passant
+                    validMoves[lastMoved.currentX, nextY] = true;
+                }
+            }
+        }
 
         return validMoves;
     }

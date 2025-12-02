@@ -2,6 +2,7 @@ using UnityEngine;
 using System.Collections.Generic;
 using Vuforia;
 using UnityEngine.InputSystem;
+using UnityEngine.UI;
 
 public enum PieceType { Peao, Torre, Cavalo, Bispo, Rainha, Rei }
 public enum PieceColor { Branco, Preto }
@@ -21,6 +22,23 @@ public class BoardManager : MonoBehaviour
 	public PieceColor currentPlayerColor = PieceColor.Branco;
 	public System.Action<PieceColor> OnTurnChanged;
 
+	// Rastreamento do último movimento (para En Passant)
+	public ChessPiece lastMovedPiece;
+	public int lastMoveFromY;
+	public int lastMoveToY;
+
+	[Header("UI")]
+	[SerializeField] private GameObject checkmateUI;
+	[SerializeField] private Text checkmateLabel;
+
+	[Header("Promotion")]
+	[SerializeField] private PromotionUI promotionUI;
+	[SerializeField] private GameObject queenPrefab;
+	[SerializeField] private GameObject rookPrefab;
+	[SerializeField] private GameObject bishopPrefab;
+	[SerializeField] private GameObject knightPrefab;
+	private bool isPromotionPending = false;
+
 	[Header("Prefabs")]
 	[Tooltip("Instancia pai do tabuleiro")]
 	[SerializeField] private GameObject boardParent;
@@ -36,7 +54,7 @@ public class BoardManager : MonoBehaviour
 	[Tooltip("Duração da animação de movimento das peças (em segundos)")]
 	[SerializeField] private float moveDuration = 0.5f;
 	[Tooltip("Altura do pulo do cavalo")]
-	[SerializeField] private float horseJumpHeight = 0.0000000015f;
+	[SerializeField] private float horseJumpHeight = 0.5f;
 	private bool isAnimating = false;
 	[SerializeField] private Camera arCamera; // Permite atribuir manualmente no Inspector
 	// [Tooltip("Offset local (X,Z) do canto inferior esquerdo (0,0) do tabuleiro em relação ao pivot do GameObject do Board.")]
@@ -82,6 +100,9 @@ public class BoardManager : MonoBehaviour
 
 		// Guardar rotação inicial do tabuleiro
 		initialBoardRotation = transform.rotation;
+
+		// Desativa UI de checkmate no início, se atribuída
+		if (checkmateUI != null) checkmateUI.SetActive(false);
 	}
 
 	private void SetupStandaloneMobile()
@@ -304,11 +325,11 @@ public class BoardManager : MonoBehaviour
 		if (selectedPiece == null) return false;
 
 		bool[,] validMoves = selectedPiece.GetValidMoves();
-		if (validMoves[toX, toY])
-		{
-			return true;
-		}
-		return false;
+		if (!validMoves[toX, toY]) return false;
+
+		// Bloqueia movimentos que deixam o rei em cheque
+		if (WouldLeaveKingInCheck(selectedPiece, toX, toY)) return false;
+		return true;
 	}
 
 	private void MoveSelectedPiece(int targetX, int targetY)
@@ -352,8 +373,25 @@ public class BoardManager : MonoBehaviour
 	{
 		isAnimating = true;
 
+		int startX = piece.currentX;
+		int startY = piece.currentY;
+
+
 		// Captura a peça inimiga se existir
 		ChessPiece pieceToCapture = GetPieceAt(targetX, targetY);
+		// En Passant: peão move em diagonal para casa vazia e captura peão atrás
+		if (piece.type == PieceType.Peao && pieceToCapture == null && targetX != startX)
+		{
+			int capturedY = startY + ((piece.color == PieceColor.Branco) ? 1 : -1);
+			ChessPiece epPawn = GetPieceAt(targetX, capturedY);
+			if (epPawn != null && epPawn.type == PieceType.Peao && epPawn.color != piece.color)
+			{
+				pieceToCapture = epPawn;
+				boardState[targetX, capturedY] = null;
+				Destroy(epPawn.gameObject);
+			}
+		}
+
 		if (pieceToCapture != null)
 		{
 			Destroy(pieceToCapture.gameObject);
@@ -400,9 +438,80 @@ public class BoardManager : MonoBehaviour
 		piece.currentY = targetY;
 		boardState[targetX, targetY] = piece;
 
+		// Incrementa contador de movimentos
+		piece.moveCount++;
+
 		// Atualiza o parent para o tile de destino
 		GameObject tile = boardTiles[targetX, targetY];
 		piece.transform.SetParent(tile.transform);
+
+		// Roque (mover torre ao mover o rei 2 casas)
+		if (piece.type == PieceType.Rei && Mathf.Abs(targetX - startX) == 2)
+		{
+			int kingY = targetY;
+			if (targetX == 6)
+			{
+				// Roque pequeno: mover torre da coluna 7 para 5
+				ChessPiece rook = GetPieceAt(7, kingY);
+				if (rook != null && rook.type == PieceType.Torre)
+				{
+					boardState[7, kingY] = null;
+					boardState[5, kingY] = rook;
+					rook.currentX = 5;
+					rook.currentY = kingY;
+					rook.moveCount++;
+					// Anima a torre para a nova posição sincronizada
+					Vector3 rookStart = rook.transform.position;
+					Vector3 rookEnd = GetWorldPosition(5, kingY);
+					StartCoroutine(AnimateAuxiliaryPiece(rook, rookStart, rookEnd));
+				}
+			}
+			else if (targetX == 2)
+			{
+				// Roque grande: mover torre da coluna 0 para 3
+				ChessPiece rook = GetPieceAt(0, kingY);
+				if (rook != null && rook.type == PieceType.Torre)
+				{
+					boardState[0, kingY] = null;
+					boardState[3, kingY] = rook;
+					rook.currentX = 3;
+					rook.currentY = kingY;
+					rook.moveCount++;
+					// Anima a torre para a nova posição sincronizada
+					Vector3 rookStart = rook.transform.position;
+					Vector3 rookEnd = GetWorldPosition(3, kingY);
+					StartCoroutine(AnimateAuxiliaryPiece(rook, rookStart, rookEnd));
+				}
+			}
+		}
+
+		// Registrar último movimento (para en passant)
+		lastMovedPiece = piece;
+		lastMoveFromY = startY;
+		lastMoveToY = targetY;
+
+		// Promoção de peão: se atingir a última fileira
+		if (piece.type == PieceType.Peao)
+		{
+			bool reachedLastRank = (piece.color == PieceColor.Branco && targetY == 7) || (piece.color == PieceColor.Preto && targetY == 0);
+			if (reachedLastRank)
+			{
+				isPromotionPending = true;
+				// Mostrar UI se disponível, senão promover automaticamente para Rainha
+				if (promotionUI != null)
+				{
+					promotionUI.Setup((selectedType) => {
+						PromotePawnTo(piece, selectedType);
+						isPromotionPending = false;
+					});
+				}
+				else
+				{
+					PromotePawnTo(piece, PieceType.Rainha);
+					isPromotionPending = false;
+				}
+			}
+		}
 
 		// Limpa seleção e highlights
 		selectedPiece = null;
@@ -411,10 +520,28 @@ public class BoardManager : MonoBehaviour
 		isAnimating = false;
 	}
 
+	private System.Collections.IEnumerator AnimateAuxiliaryPiece(ChessPiece aux, Vector3 startPos, Vector3 endPos)
+	{
+		float elapsed = 0f;
+		while (elapsed < moveDuration)
+		{
+			elapsed += Time.deltaTime;
+			float t = elapsed / moveDuration;
+			aux.transform.position = Vector3.Lerp(startPos, endPos, t);
+			yield return null;
+		}
+		aux.transform.position = endPos;
+		GameObject tile = boardTiles[aux.currentX, aux.currentY];
+		aux.transform.SetParent(tile.transform);
+	}
+
 	private void ToggleTurn()
 	{
 		currentPlayerColor = (currentPlayerColor == PieceColor.Branco) ? PieceColor.Preto : PieceColor.Branco;
 		OnTurnChanged?.Invoke(currentPlayerColor);
+
+		// Verifica checkmate para o próximo jogador
+		CheckForCheckmate(currentPlayerColor);
 	}
 
 	private System.Collections.IEnumerator ToggleTurnAfterAnimation()
@@ -424,7 +551,51 @@ public class BoardManager : MonoBehaviour
 		{
 			yield return null;
 		}
+		// Aguarda promoção, se estiver pendente
+		while (isPromotionPending)
+		{
+			yield return null;
+		}
 		ToggleTurn();
+	}
+
+	private void PromotePawnTo(ChessPiece pawn, PieceType toType)
+	{
+		// Determina prefab
+		GameObject prefab = null;
+		switch (toType)
+		{
+			case PieceType.Rainha: prefab = queenPrefab; break;
+			case PieceType.Torre: prefab = rookPrefab; break;
+			case PieceType.Bispo: prefab = bishopPrefab; break;
+			case PieceType.Cavalo: prefab = knightPrefab; break;
+			default: prefab = queenPrefab; break;
+		}
+
+		int x = pawn.currentX;
+		int y = pawn.currentY;
+		GameObject tile = boardTiles[x, y];
+
+		// Remove o peão visualmente
+		Destroy(pawn.gameObject);
+
+		// Instancia nova peça
+		if (prefab != null)
+		{
+			GameObject newPieceGO = Instantiate(prefab, GetWorldPosition(x, y), Quaternion.identity, tile.transform);
+			ChessPiece newPiece = newPieceGO.GetComponent<ChessPiece>();
+			newPiece.color = pawn.color;
+			newPiece.type = toType;
+			newPiece.Setup(x, y, this);
+			newPiece.moveCount = 0;
+			boardState[x, y] = newPiece;
+		}
+		else
+		{
+			// Sem prefab: apenas atualiza o estado para rainha sem trocar modelo (fallback)
+			pawn.type = toType;
+			boardState[x, y] = pawn;
+		}
 	}
 
 	private void ShowValidMoves(bool[,] moves)
@@ -435,6 +606,8 @@ public class BoardManager : MonoBehaviour
 			{
 				if (moves[i, j])
 				{
+					if (selectedPiece != null && WouldLeaveKingInCheck(selectedPiece, i, j))
+						continue;
 					GameObject tile = boardTiles[i, j];
 					GameObject go = Instantiate(highlightPrefab, GetWorldPosition(i, j), Quaternion.identity, transform);
 
@@ -651,6 +824,115 @@ public class BoardManager : MonoBehaviour
 			Destroy(go);
 		}
 		moveHighlights.Clear();
+	}
+
+	#endregion
+
+	#region Rules & Validation
+
+	private bool WouldLeaveKingInCheck(ChessPiece piece, int toX, int toY)
+	{
+		ChessPiece captured = boardState[toX, toY];
+		int fromX = piece.currentX;
+		int fromY = piece.currentY;
+
+		// En Passant simulation: pawn diagonal into empty square may capture behind
+		ChessPiece epCaptured = null;
+		int epY = -1;
+		if (piece.type == PieceType.Peao && captured == null && toX != fromX)
+		{
+			epY = fromY + ((piece.color == PieceColor.Branco) ? 1 : -1);
+			epCaptured = GetPieceAt(toX, epY);
+			if (epCaptured != null && epCaptured.type == PieceType.Peao && epCaptured.color != piece.color)
+			{
+				boardState[toX, epY] = null;
+			}
+		}
+
+		boardState[fromX, fromY] = null;
+		boardState[toX, toY] = piece;
+
+		int oldX = piece.currentX, oldY = piece.currentY;
+		piece.currentX = toX; piece.currentY = toY;
+
+		bool inCheck = IsInCheck(piece.color);
+
+		// revert
+		piece.currentX = oldX; piece.currentY = oldY;
+		boardState[fromX, fromY] = piece;
+		boardState[toX, toY] = captured;
+		if (epCaptured != null)
+		{
+			boardState[toX, epY] = epCaptured;
+		}
+
+		return inCheck;
+	}
+
+	private bool IsInCheck(PieceColor color)
+	{
+		int kingX = -1, kingY = -1;
+		for (int x = 0; x < 8; x++)
+		{
+			for (int y = 0; y < 8; y++)
+			{
+				var p = boardState[x, y];
+				if (p != null && p.color == color && p.type == PieceType.Rei)
+				{
+					kingX = x; kingY = y; break;
+				}
+			}
+			if (kingX != -1) break;
+		}
+		if (kingX == -1) return false;
+
+		PieceColor enemy = (color == PieceColor.Branco) ? PieceColor.Preto : PieceColor.Branco;
+		for (int x = 0; x < 8; x++)
+		{
+			for (int y = 0; y < 8; y++)
+			{
+				var p = boardState[x, y];
+				if (p != null && p.color == enemy)
+				{
+					var moves = p.GetValidMoves();
+					if (InBounds(kingX, kingY) && moves[kingX, kingY])
+						return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private bool HasAnyLegalMoves(PieceColor color)
+	{
+		foreach (var piece in GetPieces(color))
+		{
+			var moves = piece.GetValidMoves();
+			for (int x = 0; x < 8; x++)
+			{
+				for (int y = 0; y < 8; y++)
+				{
+					if (moves[x, y] && !WouldLeaveKingInCheck(piece, x, y))
+						return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private void CheckForCheckmate(PieceColor colorToPlay)
+	{
+		bool inCheck = IsInCheck(colorToPlay);
+		bool hasMoves = HasAnyLegalMoves(colorToPlay);
+		if (inCheck && !hasMoves)
+		{
+			if (checkmateLabel != null)
+			{
+				PieceColor winner = (colorToPlay == PieceColor.Branco) ? PieceColor.Preto : PieceColor.Branco;
+				checkmateLabel.text = $"Xeque-mate! Vencedor: {winner}";
+			}
+			if (checkmateUI != null) checkmateUI.SetActive(true);
+		}
 	}
 
 	#endregion

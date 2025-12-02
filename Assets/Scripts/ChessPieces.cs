@@ -11,6 +11,9 @@ public abstract class ChessPiece : MonoBehaviour
     public int currentX { get; set; }
     public int currentY { get; set; }
 
+	// Contador de movimentos da peça (usado para roque, en passant, etc.)
+	public int moveCount { get; set; } = 0;
+
 	// Referência ao gerenciador do jogo
 	protected BoardManager boardManager;
 
